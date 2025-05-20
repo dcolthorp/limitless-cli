@@ -1,0 +1,16 @@
+Metadata-Version: 2.4
+Name: limitless-cli
+Version: 0.7.0
+Summary: CLI utility for interacting with Limitless AI transcription device data
+Author: Limitless AI
+Requires-Python: >=3.9
+Requires-Dist: requests>=2.25.0
+Requires-Dist: python-dateutil>=2.8.2
+Requires-Dist: tzdata>=2021.1; python_version < "3.9"
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0.0; extra == "dev"
+Requires-Dist: black>=22.0.0; extra == "dev"
+Requires-Dist: isort>=5.0.0; extra == "dev"
+Requires-Dist: mypy>=0.900; extra == "dev"
+Requires-Dist: types-requests>=2.25.0; extra == "dev"
+Requires-Dist: types-python-dateutil>=2.8.0; extra == "dev"
