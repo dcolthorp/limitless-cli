@@ -1155,13 +1155,7 @@ def main():
 
     # -- Old complex logic removed --
 
-if __name__=="__main__":
-    try:
-        import requests
-    except ImportError:
-        print("Error: install requests (`pip install requests`)", file=sys.stderr)
-        sys.exit(1)
-    main()
+
 
 
 """
@@ -1719,3 +1713,4 @@ paths:
 #             application/json:
 #               schema:
 #                 $ref: "#/components/schemas/LifelogsResponse"
+
