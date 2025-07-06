@@ -41,7 +41,8 @@ from ..core.utils import (
     get_tz,
     parse_date,
 )
-from ..api.client import ApiClient, ApiError
+from ..api.client import ApiError
+from ..api.high_level import LimitlessAPI
 from .backend import CacheBackend, FilesystemCacheBackend, CacheEntry
 
 __all__: list[str] = ["CacheManager"]
@@ -58,9 +59,29 @@ class CacheManager:
     # ---------------------------------------------------------------------
     # Construction helpers
     # ---------------------------------------------------------------------
-    def __init__(self, client: ApiClient, backend: CacheBackend | None = None):
-        self.client = client
-        self.backend: CacheBackend = backend or FilesystemCacheBackend()
+    def __init__(
+        self,
+        api: LimitlessAPI | None = None,
+        backend: CacheBackend | None = None,
+        *,
+        verbose: bool | None = None,
+        client_legacy: Any | None = None,  # backwards compatibility
+    ):
+        # If caller passed an ApiClient (legacy), wrap it in LimitlessAPI
+        if client_legacy and not api:
+            # defer import here to avoid circular
+            from ..api.client import ApiClient
+
+            if isinstance(client_legacy, ApiClient):
+                api = LimitlessAPI(client_legacy)  # type: ignore[arg-type]
+
+        self.api = api or LimitlessAPI()
+        self.backend = backend or FilesystemCacheBackend()
+
+        if verbose is None:
+            transport = getattr(self.api, "transport", None)
+            verbose = bool(getattr(transport, "verbose", False))
+        self.verbose: bool = verbose
 
         # Internal bookkeeping (unchanged)
         self._cache_scan_cache: dict[str, Dict[date, Tuple[bool, Optional[date]]]] = {}
@@ -100,7 +121,7 @@ class CacheManager:
                 )
             return logs, data_date_from_file, fetched_on_date_from_file, confirmed_date
         except (json.JSONDecodeError, KeyError, FileNotFoundError) as exc:
-            eprint(f"[Cache] Failed to read {cache_path}: {exc}", self.client.verbose)
+            eprint(f"[Cache] Failed to read {cache_path}: {exc}", self.verbose)
             if isinstance(exc, (json.JSONDecodeError, KeyError)) and cache_path.exists():
                 cache_path.unlink(missing_ok=True)
             raise
@@ -187,19 +208,19 @@ class CacheManager:
         execution_date: date,
         quiet: bool = False,
     ) -> bool:
-        eprint(f"[Cache] Probe for {probe_day}…", self.client.verbose)
+        eprint(f"[Cache] Probe for {probe_day}…", self.verbose)
         params = dict(common_params)
         params["date"] = probe_day.isoformat()
         params["limit"] = 1
         try:
-            probe_logs = list(self.client.paginated("lifelogs", params, max_results=1))
+            probe_logs = list(self._iter_api_lifelogs(params, max_results=1))
             if probe_logs:
                 path = self._path(probe_day)
                 self._write_cache_file(path, probe_logs, probe_day, execution_date, execution_date, quiet)
                 return True
             return False
         except Exception as exc:  # noqa: BLE001
-            eprint(f"[Cache] Probe error: {exc}", self.client.verbose)
+            eprint(f"[Cache] Probe error: {exc}", self.verbose)
             return False
 
     # ---------------------------------------------------------------------
@@ -221,7 +242,7 @@ class CacheManager:
         execution_date = datetime.now(tz).date()
 
         if day > execution_date and not force_cache:
-            eprint(f"[Fetch] Skipping future date {day}", self.client.verbose)
+            eprint(f"[Fetch] Skipping future date {day}", self.verbose)
             return [], None
 
         logs: List[Dict[str, Any]] = []
@@ -253,14 +274,14 @@ class CacheManager:
             api_params["date"] = day.isoformat()
             api_params.setdefault("limit", common.get("limit", PAGE_LIMIT))
             try:
-                fetched_logs = list(self.client.paginated("lifelogs", api_params))
+                fetched_logs = list(self._iter_api_lifelogs(api_params))
                 logs = fetched_logs
                 if logs:
                     max_date_in_logs = day
                 self._save_logs(day, logs, execution_date, execution_date, quiet)
                 self._mark_fetched(day)
             except ApiError as exc:
-                eprint(f"API error for {day}: {exc}", self.client.verbose)
+                eprint(f"API error for {day}: {exc}", self.verbose)
                 logs = []
                 max_date_in_logs = None
 
@@ -370,7 +391,7 @@ class CacheManager:
                 logs, _, fetched_on, confirmed = self._read_cache_file(path, d)
                 if confirmed is None or confirmed < effective_max:
                     self._write_cache_file(path, logs, d, fetched_on, execution_date, quiet)
-                    eprint(f"[Cache] Confirmation upgraded for {d} → {effective_max}", self.client.verbose)
+                    eprint(f"[Cache] Confirmation upgraded for {d} → {effective_max}", self.verbose)
             except Exception:
                 continue
 
@@ -400,7 +421,7 @@ class CacheManager:
             progress_print(f"[Bulk] Fetching {start} → {effective_end}…", quiet)
         logs_by_day: Dict[date, List[Dict[str, Any]]] = defaultdict(list)
         fetched = 0
-        for lg in self.client.paginated("lifelogs", params, max_results=max_results):
+        for lg in self._iter_api_lifelogs(params, max_results=max_results):
             dstr = lg.get("date") or lg.get("created_at") or lg.get("timestamp")
             if not dstr:
                 continue
@@ -531,7 +552,7 @@ class CacheManager:
                             local[current] = day_logs
                             current += timedelta(days=1)
                 except Exception as exc:
-                    eprint(f"[Hybrid] Gap {g_start}-{g_end} error: {exc}", self.client.verbose)
+                    eprint(f"[Hybrid] Gap {g_start}-{g_end} error: {exc}", self.verbose)
                 return local
 
             if len(plan) == 1:
@@ -570,3 +591,16 @@ class CacheManager:
     # ---------------------------------------------------------------------
     def _mark_fetched(self, d: date) -> None:
         self._fetched_this_session.add(d) 
+
+    # ---------------------------------------------------------------------
+    # API helpers
+    # ---------------------------------------------------------------------
+
+    def _iter_api_lifelogs(
+        self, params: Dict[str, Any], *, max_results: Optional[int] = None
+    ) -> Iterator[Dict[str, Any]]:
+        """Yield raw lifelog dictionaries via the high-level API's paginator."""
+
+        # Accessing a protected member is acceptable internally for adapter
+        paginate = getattr(self.api, "_paginate")  # type: ignore[attr-defined]
+        yield from paginate("lifelogs", params, max_results=max_results)  # type: ignore[misc] 

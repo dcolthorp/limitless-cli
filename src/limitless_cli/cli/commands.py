@@ -43,6 +43,9 @@ def handle_list(args: Any, quiet: bool = False) -> None:  # noqa: ANN401
     """Fetch and print lifelogs for a date or datetime range."""
 
     client = ApiClient(verbose=args.verbose)
+    from ..api.high_level import LimitlessAPI
+
+    api = LimitlessAPI(client)
     parallel = getattr(args, "parallel", 1)
 
     common: dict[str, Any] = {
@@ -60,7 +63,7 @@ def handle_list(args: Any, quiet: bool = False) -> None:  # noqa: ANN401
             start_date = parse_datetime(args.start, tz).date()
             end_date = parse_datetime(args.end, tz).date()
 
-        cm = CacheManager(client)
+        cm = CacheManager(api=api, verbose=args.verbose)
         force_cache = getattr(args, "force_cache", False)
         if not quiet:
             progress_print(f"Processing logs from {start_date} to {end_date}…", quiet)
