@@ -6,6 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "limitless-cli"
 version = "0.7.0"
 description = "CLI utility for interacting with Limitless AI transcription device data"
+readme = "README.md"
+license = {file = "LICENSE"}
 authors = [
     {name = "Limitless AI"},
 ]
@@ -26,10 +28,16 @@ dev = [
     "types-python-dateutil>=2.8.0"
 ]
 
-[project.scripts]
-limitless = "limitless:main"
-
 [tool.black]
 line-length = 100
 target-version = ['py39']
 include = '\.pyi?$'
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+limitless = "limitless_cli.cli.entry:main"

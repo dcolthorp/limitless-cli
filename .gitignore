@@ -29,3 +29,27 @@ node_modules/
 tasks.json
 tasks/ 
 
+*.pyc
+
+# Python bytecode and cache files
+__pycache__/
+*.py[cod]
+*.pyd
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+*.whl
+
+# Testing & coverage
+.pytest_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Local tooling & virtual envs (kept for clarity)
+.Python

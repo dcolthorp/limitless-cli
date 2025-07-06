@@ -1,0 +1,5 @@
+---
+alwaysApply: true
+---
+
+Always read @docs/api_reference.md to understand the structure of the Limitless API when reasoning about code that interacts with the API.
