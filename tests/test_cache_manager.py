@@ -6,9 +6,11 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from limitless_cli.api.high_level import LimitlessAPI, InMemoryTransport, LifelogJSON
+from limitless_cli.api.high_level import LimitlessAPI
+from limitless_cli.api.transports import InMemoryTransport
+from limitless_cli.api.transports.memory import LifelogJSON
 from limitless_cli.cache.manager import CacheManager
-from limitless_cli.cache.backend import InMemoryCacheBackend, CacheEntry
+from limitless_cli.cache.backends import InMemoryCacheBackend, CacheEntry
 
 # --- Test Constants ---
 TZ = timezone.utc

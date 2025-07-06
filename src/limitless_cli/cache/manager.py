@@ -43,7 +43,7 @@ from ..core.utils import (
 )
 from ..api.client import ApiError
 from ..api.high_level import LimitlessAPI
-from .backend import CacheBackend, FilesystemCacheBackend, CacheEntry
+from .backends import CacheBackend, FilesystemCacheBackend, CacheEntry
 
 __all__: list[str] = ["CacheManager"]
 
