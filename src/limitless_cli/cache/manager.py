@@ -42,8 +42,14 @@ from ..core.utils import (
     parse_date,
 )
 from ..api.client import ApiClient, ApiError
+from .backend import CacheBackend, FilesystemCacheBackend, CacheEntry
 
 __all__: list[str] = ["CacheManager"]
+
+
+# ---------------------------------------------------------------------------
+# CacheManager
+# ---------------------------------------------------------------------------
 
 
 class CacheManager:
@@ -52,20 +58,21 @@ class CacheManager:
     # ---------------------------------------------------------------------
     # Construction helpers
     # ---------------------------------------------------------------------
-    def __init__(self, client: ApiClient, root: Path | None = None):
+    def __init__(self, client: ApiClient, backend: CacheBackend | None = None):
         self.client = client
-        self.root = root or CACHE_ROOT
+        self.backend: CacheBackend = backend or FilesystemCacheBackend()
 
-        self._cache_write_lock = threading.Lock()
-        self._cache_scan_lock = threading.Lock()
+        # Internal bookkeeping (unchanged)
         self._cache_scan_cache: dict[str, Dict[date, Tuple[bool, Optional[date]]]] = {}
+        self._cache_scan_lock = threading.Lock()
+        self._cache_write_lock = threading.Lock()
         self._fetched_this_session: Set[date] = set()
 
     # ---------------------------------------------------------------------
     # Internal path helpers
     # ---------------------------------------------------------------------
     def _path(self, d: date) -> Path:
-        return self.root / f"{d:%Y/%m}" / f"{d.isoformat()}.json"
+        return self.backend.path(d)
 
     # ---------------------------------------------------------------------
     # Cache file helpers
@@ -98,42 +105,34 @@ class CacheManager:
                 cache_path.unlink(missing_ok=True)
             raise
 
+    def _save_logs(
+        self,
+        day: date,
+        logs: List[Dict[str, Any]],
+        fetched_on_date: date,
+        execution_date: date,
+        quiet: bool,
+    ) -> None:
+        """Persist *logs* for *day* via the configured backend."""
+
+        confirmed = self._get_max_known_non_empty_data_date(day, execution_date, quiet)
+        entry = CacheEntry(logs, day, fetched_on_date, confirmed)
+        with self._cache_write_lock:
+            self.backend.write(entry)
+            with self._cache_scan_lock:
+                self._cache_scan_cache.clear()
+
+    # Backwards-compat alias so legacy call sites continue to work
     def _write_cache_file(
         self,
-        cache_path: Path,
+        _unused_path: Path,  # kept for signature compatibility
         logs: List[Dict[str, Any]],
         data_date: date,
         fetched_on_date: date,
         execution_date: date,
         quiet: bool,
-    ) -> None:
-        """Write cache in new format, with atomic temp file swap."""
-
-        with self._cache_write_lock:
-            confirmed = self._get_max_known_non_empty_data_date(
-                data_date, execution_date, quiet
-            )
-            payload = {
-                "data_date": data_date.isoformat(),
-                "fetched_on_date": fetched_on_date.isoformat(),
-                "logs": logs,
-                "confirmed_complete_up_to_date": confirmed.isoformat() if confirmed else None,
-            }
-            try:
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = cache_path.with_suffix(".tmp")
-                tmp.write_text(json.dumps(payload, indent=2))
-                tmp.replace(cache_path)
-                eprint(f"[Cache] wrote {cache_path}", self.client.verbose)
-                with self._cache_scan_lock:
-                    self._cache_scan_cache.clear()
-            except Exception as exc:  # pragma: no cover – unlikely IO errors
-                eprint(f"[Cache] Error writing {cache_path}: {exc}", self.client.verbose)
-                try:
-                    if tmp.exists():
-                        tmp.unlink()
-                except Exception:  # noqa: BLE001
-                    pass
+    ) -> None:  # noqa: D401 – delegate
+        self._save_logs(data_date, logs, fetched_on_date, execution_date, quiet)
 
     # ---------------------------------------------------------------------
     # Cache directory scanning helpers
@@ -148,27 +147,7 @@ class CacheManager:
             if cache_key in self._cache_scan_cache:
                 return self._cache_scan_cache[cache_key]
 
-        result: Dict[date, Tuple[bool, Optional[date]]] = {}
-        if self.root.exists():
-            try:
-                for year_dir in self.root.iterdir():
-                    if not (year_dir.is_dir() and year_dir.name.isdigit() and len(year_dir.name) == 4):
-                        continue
-                    for month_dir in year_dir.iterdir():
-                        if not (month_dir.is_dir() and month_dir.name.isdigit() and len(month_dir.name) == 2):
-                            continue
-                        for cache_file_path in month_dir.glob("*.json"):
-                            try:
-                                file_date = datetime.strptime(cache_file_path.stem, API_DATE_FMT).date()
-                                if file_date > execution_date:
-                                    continue
-                                logs, _, _, confirmed = self._read_cache_file(cache_file_path, file_date)
-                                result[file_date] = (bool(logs), confirmed)
-                            except Exception:
-                                continue
-            except Exception as exc:
-                eprint(f"[Cache] Error scanning cache dir: {exc}", self.client.verbose)
-
+        result = self.backend.scan(execution_date)
         with self._cache_scan_lock:
             self._cache_scan_cache[cache_key] = result
         return result
@@ -240,7 +219,6 @@ class CacheManager:
         tz_name = common.get("timezone", DEFAULT_TZ)
         tz = get_tz(tz_name)
         execution_date = datetime.now(tz).date()
-        cache_path = self._path(day)
 
         if day > execution_date and not force_cache:
             eprint(f"[Fetch] Skipping future date {day}", self.client.verbose)
@@ -248,28 +226,22 @@ class CacheManager:
 
         logs: List[Dict[str, Any]] = []
         max_date_in_logs: Optional[date] = None
-        needs_fetch = True
 
         # ---------------- Cache lookup ----------------
-        if cache_path.exists():
-            try:
-                cached_logs, data_date_from_file, _, confirmed = self._read_cache_file(cache_path, day)
-                if force_cache:
-                    logs = cached_logs
-                    max_date_in_logs = data_date_from_file if logs else None
+        entry = self.backend.read(day)
+        needs_fetch = True
+        if entry is not None:
+            if force_cache:
+                logs = entry.logs
+                max_date_in_logs = day if logs else None
+                needs_fetch = False
+            else:
+                if day == execution_date:
+                    needs_fetch = True  # always refresh today
+                elif entry.confirmed_complete_up_to_date and entry.confirmed_complete_up_to_date > entry.data_date:
+                    logs = entry.logs
+                    max_date_in_logs = day if logs else None
                     needs_fetch = False
-                else:
-                    if day == execution_date:
-                        needs_fetch = True  # always refresh today
-                    elif confirmed and confirmed > data_date_from_file:
-                        logs = cached_logs
-                        max_date_in_logs = data_date_from_file if logs else None
-                        needs_fetch = False
-            except Exception:
-                if force_cache:
-                    needs_fetch = False
-                else:
-                    needs_fetch = True
         elif force_cache:
             needs_fetch = False
 
@@ -285,7 +257,7 @@ class CacheManager:
                 logs = fetched_logs
                 if logs:
                     max_date_in_logs = day
-                self._write_cache_file(cache_path, logs, day, execution_date, execution_date, quiet)
+                self._save_logs(day, logs, execution_date, execution_date, quiet)
                 self._mark_fetched(day)
             except ApiError as exc:
                 eprint(f"API error for {day}: {exc}", self.client.verbose)
