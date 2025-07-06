@@ -521,13 +521,9 @@ class CacheManager:
         if not plan:
             current = start
             while current <= min(end, execution_date):
-                path = self._path(current)
-                if path.exists():
-                    try:
-                        cached_logs, *_ = self._read_cache_file(path, current)
-                        logs_by_day[current] = cached_logs
-                    except Exception:
-                        logs_by_day[current] = []
+                entry = self.backend.read(current)
+                if entry:
+                    logs_by_day[current] = entry.logs
                 current += timedelta(days=1)
         else:
             def execute_gap(gap: Tuple[date, date, str]) -> Dict[date, List[Dict[str, Any]]]:
@@ -555,25 +551,24 @@ class CacheManager:
                     eprint(f"[Hybrid] Gap {g_start}-{g_end} error: {exc}", self.verbose)
                 return local
 
+            # Fetch logs from API for all identified gaps
             if len(plan) == 1:
                 logs_by_day.update(execute_gap(plan[0]))
             else:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=HYBRID_MAX_WORKERS) as ex:
                     for res in ex.map(execute_gap, plan):
                         logs_by_day.update(res)
+            
+            # **FIX**: After fetching, iterate over the *entire* range again
+            # and fill in any days from the cache that were not part of the API fetch.
             current = start
             while current <= min(end, execution_date):
                 if current not in logs_by_day:
-                    path = self._path(current)
-                    if path.exists():
-                        try:
-                            cached_logs, *_ = self._read_cache_file(path, current)
-                            logs_by_day[current] = cached_logs
-                        except Exception:
-                            logs_by_day[current] = []
-                    else:
-                        logs_by_day[current] = []
+                    entry = self.backend.read(current)
+                    if entry:
+                        logs_by_day[current] = entry.logs
                 current += timedelta(days=1)
+
         latest_non_empty = max((d for d, l in logs_by_day.items() if l), default=None)
         if latest_non_empty:
             self._post_run_upgrade_confirmations(latest_non_empty, execution_date, quiet)

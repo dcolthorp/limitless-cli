@@ -116,8 +116,11 @@ class InMemoryTransport(Transport):
     cache logic.  Additional endpoints can be added on demand.
     """
 
-    def __init__(self, lifelogs: Optional[List[LifelogJSON]] = None):
-        self._lifelogs: List[LifelogJSON] = lifelogs[:] if lifelogs else []
+    def __init__(self, verbose: bool = False):
+        self._lifelogs: list[LifelogJSON] = []
+        self._content_nodes: dict[str, ContentNodeJSON] = {}
+        self.verbose = verbose
+        self.request_log: list[tuple[str, dict[str, Any]]] = []
 
     # ----------------------- seeding helpers --------------------
 
@@ -126,9 +129,26 @@ class InMemoryTransport(Transport):
 
         self._lifelogs.extend(logs)
 
+    @property
+    def requests_made(self) -> int:
+        """Return the number of requests made to this transport."""
+        return len(self.request_log)
+
+    # ----------------------- test helpers ----------------------
+
+    def reset(self) -> None:  # noqa: D401 – testing utility
+        """Clear all stored logs and recorded requests (testing convenience)."""
+        self._lifelogs.clear()
+        self.request_log.clear()
+
     # ----------------------- Transport API ----------------------
 
     def request(self, endpoint: str, params: Dict[str, Any]) -> Dict[str, Any]:  # type: ignore[override]
+        """Simulate a low-level Limitless API request (lifelogs only)."""
+
+        # Track the call for assertions in unit-tests
+        self.request_log.append((endpoint, dict(params)))
+
         if endpoint != "lifelogs":
             return {}
 
