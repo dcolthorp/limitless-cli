@@ -8,7 +8,7 @@ This tool allows you to fetch, cache, and display lifelog data directly from the
 
 - **Robust Caching**: Intelligently caches daily logs to minimize API calls while ensuring data is complete and up-to-date. See the full [caching strategy](./docs/caching_strategy.md) for details.
 - **Flexible Queries**: Fetch data for a single day, a specific week, a date range, or using relative periods like `today`, `last-week`, or `this-month`.
-- **Multiple Fetch Strategies**: Automatically uses a hybrid fetch strategy to balance API efficiency and speed, with optional parallel fetching.
+- **Multiple Fetch Strategies**: Supports three streaming strategies (Daily, Bulk, Hybrid) to optimize for different scenarios. The default Hybrid strategy automatically analyzes gaps and uses the most efficient approach for each.
 - **Multiple Output Formats**: View data as clean, readable markdown or as raw JSON for piping to other tools.
 
 ## Installation
@@ -117,6 +117,7 @@ limitless list --start "2024-07-01 00:00:00" --end "2024-07-07 23:59:59"
 - Use `--verbose` (`-v`) to see detailed debugging output.
 - Use `--force-cache` (`-fc`) to bypass API calls and use only local cache (useful for offline access).
 - Use `--parallel <N>` to specify the number of parallel workers for fetching multiple days.
+- Configure fetch strategy via `FETCH_STRATEGY` environment variable: `HYBRID` (default), `PER_DAY`, or `BULK`.
 
 ## Developer Documentation
 

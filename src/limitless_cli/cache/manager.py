@@ -44,6 +44,7 @@ from ..core.utils import (
 from ..api.client import ApiError
 from ..api.high_level import LimitlessAPI
 from .backends import CacheBackend, FilesystemCacheBackend, CacheEntry
+from .streaming import DailyStreamer, BulkStreamer, HybridStreamer
 
 __all__: list[str] = ["CacheManager"]
 
@@ -82,6 +83,11 @@ class CacheManager:
             transport = getattr(self.api, "transport", None)
             verbose = bool(getattr(transport, "verbose", False))
         self.verbose: bool = verbose
+
+        # Initialize streaming strategies
+        self._daily_streamer = DailyStreamer(self.api, self.backend, verbose=self.verbose, cache_manager=self)
+        self._bulk_streamer = BulkStreamer(self.api, self.backend, verbose=self.verbose, cache_manager=self)
+        self._hybrid_streamer = HybridStreamer(self.api, self.backend, verbose=self.verbose, cache_manager=self)
 
         # Internal bookkeeping (unchanged)
         self._cache_scan_cache: dict[str, Dict[date, Tuple[bool, Optional[date]]]] = {}
@@ -304,46 +310,15 @@ class CacheManager:
         """Yield logs over *start*…*end* inclusive in requested order."""
 
         strategy = "BULK" if USE_BULK_RANGE_PAGINATION else FETCH_STRATEGY
+        
+        # Delegate to appropriate streaming strategy
         if strategy == "BULK" and not force_cache:
-            yield from self._stream_range_bulk(start, end, common, max_results, quiet)
-            return
-        if strategy == "HYBRID" and not force_cache:
-            yield from self._stream_range_hybrid(start, end, common, max_results, quiet)
-            return
-
-        tz_name = common.get("timezone", DEFAULT_TZ)
-        tz = get_tz(tz_name)
-        execution_date = datetime.now(tz).date()
-
-        days = [d for d in (start + timedelta(days=i) for i in range((end - start).days + 1)) if d <= execution_date]
-        days_rev = sorted(days, reverse=True)
-
-        cache_data = self._scan_cache_directory(execution_date) if not force_cache else {}
-        need_probe = self._should_probe_for_completeness(days_rev, execution_date, cache_data, force_cache)
-
-        if need_probe:
-            probe_date = max(days_rev) + timedelta(days=1)
-            if probe_date > execution_date:
-                probe_date = execution_date
-            self._perform_latest_data_probe(probe_date, common, execution_date, quiet)
-
-        logs_by_day: Dict[date, List[Dict[str, Any]]] = {}
-        for d in days_rev:
-            logs, _ = self.fetch_day(d, common, quiet=quiet, force_cache=force_cache, probe_already_done=True)
-            logs_by_day[d] = logs
-
-        latest_non_empty = max((d for d, l in logs_by_day.items() if l), default=None)
-        if latest_non_empty:
-            self._post_run_upgrade_confirmations(latest_non_empty, execution_date, quiet)
-
-        order = sorted(days, reverse=(common.get("direction", "desc") == "desc"))
-        count = 0
-        for d in order:
-            for lg in logs_by_day.get(d, []):
-                if max_results is not None and count >= max_results:
-                    return
-                yield lg
-                count += 1
+            yield from self._bulk_streamer.stream_range(start, end, common, max_results=max_results, quiet=quiet, force_cache=force_cache)
+        elif strategy == "HYBRID" and not force_cache:
+            yield from self._hybrid_streamer.stream_range(start, end, common, max_results=max_results, quiet=quiet, force_cache=force_cache)
+        else:
+            # Default to daily strategy (PER_DAY or force_cache)
+            yield from self._daily_streamer.stream_range(start, end, common, max_results=max_results, quiet=quiet, force_cache=force_cache)
 
     # ---------------------------------------------------------------------
     # Confirmation / probe helpers
@@ -394,192 +369,6 @@ class CacheManager:
                     eprint(f"[Cache] Confirmation upgraded for {d} → {effective_max}", self.verbose)
             except Exception:
                 continue
-
-    # ---------------------------------------------------------------------
-    # Hybrid and bulk helpers (identical to original script)
-    # ---------------------------------------------------------------------
-    def _stream_range_bulk(
-        self,
-        start: date,
-        end: date,
-        common: Dict[str, Any],
-        max_results: Optional[int],
-        quiet: bool,
-    ) -> Iterator[Dict[str, Any]]:
-        tz_name = common.get("timezone", DEFAULT_TZ)
-        tz = get_tz(tz_name)
-        execution_date = datetime.now(tz).date()
-        if start > execution_date:
-            return
-        effective_end = min(end, execution_date)
-        params = dict(common)
-        params.pop("date", None)
-        params["start"] = f"{start.isoformat()} 00:00:00"
-        params["end"] = f"{effective_end.isoformat()} 23:59:59"
-        params.setdefault("limit", common.get("limit", PAGE_LIMIT))
-        if not quiet:
-            progress_print(f"[Bulk] Fetching {start} → {effective_end}…", quiet)
-        logs_by_day: Dict[date, List[Dict[str, Any]]] = defaultdict(list)
-        fetched = 0
-        for lg in self._iter_api_lifelogs(params, max_results=max_results):
-            dstr = lg.get("date") or lg.get("created_at") or lg.get("timestamp")
-            if not dstr:
-                continue
-            try:
-                d_obj = datetime.strptime(dstr[:10], API_DATE_FMT).date()
-            except ValueError:
-                continue
-            if d_obj < start or d_obj > effective_end:
-                continue
-            logs_by_day[d_obj].append(lg)
-            fetched += 1
-            if max_results is not None and fetched >= max_results:
-                break
-        for day_cursor in (start + timedelta(days=n) for n in range((effective_end - start).days + 1)):
-            if day_cursor > execution_date:
-                continue
-            self._write_cache_file(
-                self._path(day_cursor),
-                logs_by_day.get(day_cursor, []),
-                day_cursor,
-                execution_date,
-                execution_date,
-                quiet,
-            )
-            self._mark_fetched(day_cursor)
-        latest_non_empty = max((d for d, l in logs_by_day.items() if l), default=None)
-        if latest_non_empty:
-            self._post_run_upgrade_confirmations(latest_non_empty, execution_date, quiet)
-        order = sorted(logs_by_day.keys(), reverse=(common.get("direction", "desc") == "desc"))
-        for d in order:
-            for lg in logs_by_day[d]:
-                yield lg
-
-    # ---------------------------------------------------------------------
-    # Hybrid strategy helpers
-    # ---------------------------------------------------------------------
-    def _plan_hybrid_fetch(
-        self,
-        start: date,
-        end: date,
-        execution_date: date,
-        cache_data: Dict[date, Tuple[bool, Optional[date]]],
-    ) -> List[Tuple[date, date, str]]:
-        needs_api: List[date] = []
-        current = start
-        while current <= end and current <= execution_date:
-            needs = False
-            if current == execution_date:
-                needs = True
-            elif current not in cache_data:
-                needs = True
-            else:
-                has_data, confirmed = cache_data[current]
-                if confirmed is None or confirmed <= current:
-                    needs = True
-            if needs:
-                needs_api.append(current)
-            current += timedelta(days=1)
-        if not needs_api:
-            return []
-        gaps: List[Tuple[date, date]] = []
-        gap_start = needs_api[0]
-        gap_end = gap_start
-        for day in needs_api[1:]:
-            if day == gap_end + timedelta(days=1):
-                gap_end = day
-            else:
-                gaps.append((gap_start, gap_end))
-                gap_start = day
-                gap_end = day
-        gaps.append((gap_start, gap_end))
-        total_days = (min(end, execution_date) - start).days + 1
-        plan: List[Tuple[date, date, str]] = []
-        for g_start, g_end in gaps:
-            gap_days = (g_end - g_start).days + 1
-            ratio = gap_days / total_days if total_days else 0
-            strategy = "bulk" if gap_days >= HYBRID_BULK_MIN_DAYS or ratio >= HYBRID_BULK_RATIO else "daily"
-            plan.append((g_start, g_end, strategy))
-        return plan
-
-    def _stream_range_hybrid(
-        self,
-        start: date,
-        end: date,
-        common: Dict[str, Any],
-        max_results: Optional[int],
-        quiet: bool,
-    ) -> Iterator[Dict[str, Any]]:
-        tz_name = common.get("timezone", DEFAULT_TZ)
-        tz = get_tz(tz_name)
-        execution_date = datetime.now(tz).date()
-        if start > execution_date:
-            return
-        cache_data = self._scan_cache_directory(execution_date)
-        plan = self._plan_hybrid_fetch(start, end, execution_date, cache_data)
-        logs_by_day: Dict[date, List[Dict[str, Any]]] = {}
-        if not plan:
-            current = start
-            while current <= min(end, execution_date):
-                entry = self.backend.read(current)
-                if entry:
-                    logs_by_day[current] = entry.logs
-                current += timedelta(days=1)
-        else:
-            def execute_gap(gap: Tuple[date, date, str]) -> Dict[date, List[Dict[str, Any]]]:
-                g_start, g_end, strategy = gap
-                local: Dict[date, List[Dict[str, Any]]] = {}
-                try:
-                    if strategy == "bulk":
-                        for lg in self._stream_range_bulk(g_start, g_end, common, None, True):  # quiet=True
-                            dstr = lg.get("date") or lg.get("created_at") or lg.get("timestamp")
-                            if not dstr:
-                                continue
-                            try:
-                                d_obj = datetime.strptime(dstr[:10], API_DATE_FMT).date()
-                            except ValueError:
-                                continue
-                            if g_start <= d_obj <= g_end:
-                                local.setdefault(d_obj, []).append(lg)
-                    else:
-                        current = g_start
-                        while current <= g_end:
-                            day_logs, _ = self.fetch_day(current, common, quiet=True, probe_already_done=True)
-                            local[current] = day_logs
-                            current += timedelta(days=1)
-                except Exception as exc:
-                    eprint(f"[Hybrid] Gap {g_start}-{g_end} error: {exc}", self.verbose)
-                return local
-
-            # Fetch logs from API for all identified gaps
-            if len(plan) == 1:
-                logs_by_day.update(execute_gap(plan[0]))
-            else:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=HYBRID_MAX_WORKERS) as ex:
-                    for res in ex.map(execute_gap, plan):
-                        logs_by_day.update(res)
-            
-            # **FIX**: After fetching, iterate over the *entire* range again
-            # and fill in any days from the cache that were not part of the API fetch.
-            current = start
-            while current <= min(end, execution_date):
-                if current not in logs_by_day:
-                    entry = self.backend.read(current)
-                    if entry:
-                        logs_by_day[current] = entry.logs
-                current += timedelta(days=1)
-
-        latest_non_empty = max((d for d, l in logs_by_day.items() if l), default=None)
-        if latest_non_empty:
-            self._post_run_upgrade_confirmations(latest_non_empty, execution_date, quiet)
-        order = sorted(logs_by_day.keys(), reverse=(common.get("direction", "desc") == "desc"))
-        count = 0
-        for d in order:
-            for lg in logs_by_day.get(d, []):
-                if max_results is not None and count >= max_results:
-                    return
-                yield lg
-                count += 1
 
     # ---------------------------------------------------------------------
     # Misc helpers
