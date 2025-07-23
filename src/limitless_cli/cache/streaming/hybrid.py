@@ -58,27 +58,41 @@ class HybridStreamer(RangeStreamingStrategy):
         execution_date = self._get_execution_date(tz_name)
         
         if start > execution_date:
+            if self.verbose:
+                eprint(f"[Hybrid] Skipping future date range {start} > {execution_date}", True)
             return
             
         effective_end = min(end, execution_date)
         
-        # Analyze cache to determine what needs fetching
-        cache_data = self.backend.scan(execution_date)
-        plan = self._plan_hybrid_fetch(start, effective_end, execution_date, cache_data)
+        # Determine which gaps (if any) require API calls – this no longer
+        # needs a full-cache scan.
+        plan = self._plan_hybrid_fetch(start, effective_end, execution_date)
+        if self.verbose:
+            eprint(f"[Hybrid] Execution plan: {plan}", True)
         
         logs_by_day: Dict[date, List[Dict[str, Any]]] = {}
         
         if not plan:
             # No gaps need fetching, use cached data
+            if self.verbose:
+                eprint(f"[Hybrid] Using cached data only", True)
             current = start
             while current <= effective_end:
                 entry = self.backend.read(current)
                 if entry:
                     logs_by_day[current] = entry.logs
+                    if self.verbose:
+                        eprint(f"[Hybrid] Cached {current}: {len(entry.logs)} logs", True)
                 current += timedelta(days=1)
         else:
             # Execute the plan to fetch gaps
-            logs_by_day.update(self._execute_hybrid_plan(plan, common, quiet))
+            if self.verbose:
+                eprint(f"[Hybrid] Executing plan with {len(plan)} gaps", True)
+            fetched_data = self._execute_hybrid_plan(plan, common, quiet)
+            logs_by_day.update(fetched_data)
+            if self.verbose:
+                total_fetched = sum(len(logs) for logs in fetched_data.values())
+                eprint(f"[Hybrid] Fetched {total_fetched} logs across {len(fetched_data)} days", True)
             
             # Fill in any remaining days from cache
             current = start
@@ -87,6 +101,8 @@ class HybridStreamer(RangeStreamingStrategy):
                     entry = self.backend.read(current)
                     if entry:
                         logs_by_day[current] = entry.logs
+                        if self.verbose:
+                            eprint(f"[Hybrid] Added cached {current}: {len(entry.logs)} logs", True)
                 current += timedelta(days=1)
         
         # Apply post-run confirmation upgrades
@@ -97,6 +113,11 @@ class HybridStreamer(RangeStreamingStrategy):
         # Yield logs in requested order
         direction = common.get("direction", "desc")
         ordered_logs = self._order_logs_by_direction(logs_by_day, direction)
+        
+        if self.verbose:
+            total_logs = len(ordered_logs)
+            days_with_data = len([d for d, l in logs_by_day.items() if l])
+            eprint(f"[Hybrid] Yielding {total_logs} total logs from {days_with_data} days", True)
         
         count = 0
         for log in ordered_logs:
@@ -110,35 +131,45 @@ class HybridStreamer(RangeStreamingStrategy):
         start: date,
         end: date,
         execution_date: date,
-        cache_data: Dict[date, Tuple[bool, Optional[date]]],
+        cache_data: Optional[Dict[date, Tuple[bool, Optional[date]]]] = None,
     ) -> List[Tuple[date, date, str]]:
-        """Plan the hybrid fetch by identifying gaps and assigning strategies."""
-        
-        # Identify days that need API fetching
+        """Identify which sub-ranges require API calls and pick the best strategy.
+
+        Instead of scanning **all** cached files we only look at the dates that
+        actually fall inside the requested window.  For each day we inspect its
+        cache entry (if any) to decide whether it needs to be refreshed.
+        """
+
+        # --------------- Determine per-day fetch requirements -------------
         needs_api: List[date] = []
         current = start
         while current <= end and current <= execution_date:
             needs = False
+
             if current == execution_date:
-                needs = True  # Always refresh today
-            elif current not in cache_data:
-                needs = True  # No cache entry
+                needs = True  # always refresh today
             else:
-                has_data, confirmed = cache_data[current]
-                if confirmed is None or confirmed <= current:
-                    needs = True  # Unconfirmed or stale
+                entry = self.backend.read(current)
+                if entry is None:
+                    needs = True  # no cache at all
+                else:
+                    confirmed = entry.confirmed_complete_up_to_date
+                    if confirmed is None or confirmed <= current:
+                        needs = True  # unconfirmed or stale
+
             if needs:
                 needs_api.append(current)
+
             current += timedelta(days=1)
-        
+
         if not needs_api:
             return []
-        
-        # Group consecutive days into gaps
+
+        # --------------- Group consecutive days into gaps -----------------
         gaps: List[Tuple[date, date]] = []
         gap_start = needs_api[0]
         gap_end = gap_start
-        
+
         for day in needs_api[1:]:
             if day == gap_end + timedelta(days=1):
                 gap_end = day
@@ -147,23 +178,21 @@ class HybridStreamer(RangeStreamingStrategy):
                 gap_start = day
                 gap_end = day
         gaps.append((gap_start, gap_end))
-        
-        # Assign strategy to each gap
+
+        # --------------- Choose strategy for each gap ---------------------
         total_days = (end - start).days + 1
         plan: List[Tuple[date, date, str]] = []
-        
+
         for gap_start, gap_end in gaps:
             gap_days = (gap_end - gap_start).days + 1
             ratio = gap_days / total_days if total_days else 0
-            
-            # Use bulk strategy for large gaps or high ratios
+
             strategy = "bulk" if (
-                gap_days >= HYBRID_BULK_MIN_DAYS or 
-                ratio >= HYBRID_BULK_RATIO
+                gap_days >= HYBRID_BULK_MIN_DAYS or ratio >= HYBRID_BULK_RATIO
             ) else "daily"
-            
+
             plan.append((gap_start, gap_end, strategy))
-        
+
         return plan
     
     def _execute_hybrid_plan(
@@ -179,22 +208,40 @@ class HybridStreamer(RangeStreamingStrategy):
             gap_start, gap_end, strategy = gap
             local: Dict[date, List[Dict[str, Any]]] = {}
             
+            if self.verbose:
+                eprint(f"[Hybrid] Executing gap {gap_start}-{gap_end} using {strategy} strategy", True)
+            
             try:
                 if strategy == "bulk":
                     # Use bulk strategy for this gap
+                    log_count = 0
                     for log in self.bulk_streamer.stream_range(
                         gap_start, gap_end, common, quiet=True
                     ):
+                        log_count += 1
                         # Extract and validate date
-                        dstr = log.get("date") or log.get("created_at") or log.get("timestamp")
+                        dstr = log.get("date") or log.get("created_at") or log.get("timestamp") or log.get("startTime")
                         if not dstr:
+                            if self.verbose:
+                                eprint(f"[Hybrid] Warning: log {log_count} has no date field", True)
                             continue
                         try:
                             d_obj = self._parse_date(dstr[:10])
                         except ValueError:
+                            if self.verbose:
+                                eprint(f"[Hybrid] Warning: invalid date format '{dstr[:10]}' in log {log_count}", True)
                             continue
                         if gap_start <= d_obj <= gap_end:
                             local.setdefault(d_obj, []).append(log)
+                            if self.verbose and len(local[d_obj]) == 1:  # Only log first one per day
+                                eprint(f"[Hybrid] Added log to {d_obj}", True)
+                        else:
+                            if self.verbose:
+                                eprint(f"[Hybrid] Warning: log date {d_obj} not in range {gap_start}-{gap_end}", True)
+                    
+                    if self.verbose:
+                        total_in_local = sum(len(logs) for logs in local.values())
+                        eprint(f"[Hybrid] Bulk gap processed {log_count} logs, kept {total_in_local} in range", True)
                 else:
                     # Use daily strategy for this gap
                     current = gap_start
@@ -203,6 +250,8 @@ class HybridStreamer(RangeStreamingStrategy):
                             current, common, quiet=True, force_cache=False
                         )
                         local[current] = logs
+                        if self.verbose:
+                            eprint(f"[Hybrid] Daily fetched {current}: {len(logs)} logs", True)
                         current += timedelta(days=1)
                         
             except Exception as exc:

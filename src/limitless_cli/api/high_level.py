@@ -144,6 +144,14 @@ class LimitlessAPI:
         cursor: Optional[str] = None
         fetched = 0
         first = True
+        pages_fetched = 0
+        
+        # Check if the transport has verbose logging capability
+        verbose = getattr(self.transport, 'verbose', False)
+        def _log(msg: str) -> None:
+            if verbose and hasattr(self.transport, '_log'):
+                self.transport._log(msg)
+        
         while True:
             params = dict(base_params)
             if cursor:
@@ -153,6 +161,7 @@ class LimitlessAPI:
             logs = payload.get("data", {}).get("lifelogs", [])
             meta = payload.get("meta", {}).get("lifelogs", {})
             cursor = meta.get("nextCursor")
+            pages_fetched += 1
 
             if not logs and not first:
                 break
@@ -161,6 +170,7 @@ class LimitlessAPI:
 
             for lg in logs:
                 if max_results is not None and fetched >= max_results:
+                    _log(f"Pagination complete: reached max_results limit of {max_results} after {pages_fetched} pages")
                     return
                 yield lg
                 fetched += 1
@@ -168,6 +178,12 @@ class LimitlessAPI:
 
             if not cursor or (max_results is not None and fetched >= max_results):
                 break
+        
+        # Log final summary
+        if fetched > 0:
+            _log(f"Pagination complete: {fetched} total items across {pages_fetched} pages")
+        else:
+            _log(f"Pagination complete: no items found after {pages_fetched} pages")
 
     # --------------------- public API --------------------------
 

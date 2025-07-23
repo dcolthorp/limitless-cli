@@ -354,6 +354,10 @@ class CacheManager:
     def _post_run_upgrade_confirmations(
         self, final_max_date: date, execution_date: date, quiet: bool = False
     ) -> None:
+        # Fast-path: if this session didn’t fetch any new days there is nothing to
+        # upgrade, so we can avoid a costly full-cache scan entirely.
+        if not self._fetched_this_session:
+            return
         global_latest = self._get_global_latest_non_empty_date(execution_date)
         effective_max = global_latest if global_latest and global_latest > final_max_date else final_max_date
         for d in list(self._fetched_this_session):

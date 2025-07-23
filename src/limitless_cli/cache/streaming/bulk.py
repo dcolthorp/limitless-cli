@@ -36,6 +36,9 @@ class BulkStreamer(RangeStreamingStrategy):
         execution_date = self._get_execution_date(tz_name)
         
         if start > execution_date:
+            if self.verbose:
+                from ...core.utils import eprint
+                eprint(f"[Bulk] Skipping future date range {start} > {execution_date}", True)
             return
             
         effective_end = min(end, execution_date)
@@ -54,26 +57,48 @@ class BulkStreamer(RangeStreamingStrategy):
         logs_by_day: Dict[date, List[Dict[str, Any]]] = defaultdict(list)
         fetched = 0
         
+        if self.verbose:
+            from ...core.utils import eprint
+            eprint(f"[Bulk] Starting API iteration with params: {params}", True)
+        
         for log in self._iter_api_lifelogs(params, max_results=max_results):
+            fetched += 1
+            if self.verbose and fetched <= 3:  # Log first few for debugging
+                from ...core.utils import eprint
+                eprint(f"[Bulk] Processing log {fetched}: {list(log.keys())}", True)
+            
             # Extract date from log
-            dstr = log.get("date") or log.get("created_at") or log.get("timestamp")
+            dstr = log.get("date") or log.get("created_at") or log.get("timestamp") or log.get("startTime")
             if not dstr:
+                if self.verbose:
+                    from ...core.utils import eprint
+                    eprint(f"[Bulk] Warning: log {fetched} has no date field", True)
                 continue
                 
             try:
                 d_obj = self._parse_date(dstr[:10])
             except ValueError:
+                if self.verbose:
+                    from ...core.utils import eprint
+                    eprint(f"[Bulk] Warning: invalid date format '{dstr[:10]}' in log {fetched}", True)
                 continue
                 
             # Filter logs to requested range
             if d_obj < start or d_obj > effective_end:
+                if self.verbose:
+                    from ...core.utils import eprint
+                    eprint(f"[Bulk] Warning: log {fetched} date {d_obj} not in range {start}-{effective_end}", True)
                 continue
                 
             logs_by_day[d_obj].append(log)
-            fetched += 1
             
             if max_results is not None and fetched >= max_results:
                 break
+        
+        if self.verbose:
+            total_logs_by_day = sum(len(logs) for logs in logs_by_day.values())
+            from ...core.utils import eprint
+            eprint(f"[Bulk] Processed {fetched} total logs, kept {total_logs_by_day} in range across {len(logs_by_day)} days", True)
         
         # Cache the results by day
         self._cache_results_by_day(logs_by_day, start, effective_end, execution_date, quiet)
@@ -87,12 +112,22 @@ class BulkStreamer(RangeStreamingStrategy):
         direction = common.get("direction", "desc")
         ordered_logs = self._order_logs_by_direction(logs_by_day, direction)
         
+        if self.verbose:
+            from ...core.utils import eprint
+            eprint(f"[Bulk] About to yield {len(ordered_logs)} ordered logs", True)
+        
         count = 0
         for log in ordered_logs:
             if max_results is not None and count >= max_results:
+                if self.verbose:
+                    from ...core.utils import eprint
+                    eprint(f"[Bulk] Hit max_results limit of {max_results}", True)
                 break
-            yield log
             count += 1
+            if self.verbose and count <= 3:  # Log first few yields
+                from ...core.utils import eprint
+                eprint(f"[Bulk] Yielding log {count}", True)
+            yield log
     
     def _parse_date(self, date_str: str) -> date:
         """Parse date string using API date format."""

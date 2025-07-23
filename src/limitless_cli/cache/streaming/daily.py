@@ -137,22 +137,41 @@ class DailyStreamer(RangeStreamingStrategy):
         return logs, max_date_in_logs
     
     def _should_probe_for_completeness(self, days: List[date], execution_date: date) -> bool:
-        """Check if we should probe for completeness."""
+        """Determine whether a completeness probe is necessary.
+
+        We can fast-exit in the very common scenario where all requested days
+        already carry a *confirmed_complete_up_to_date* stamp that is newer
+        than the latest day in the range.  In that case we *know* the range is
+        complete, so there is no need to perform the expensive full-cache scan
+        (which opens every JSON file).
+        """
+
         if not any(d < execution_date for d in days):
+            # Range is entirely today/future – never probe.
             return False
-            
+
         max_date_in_range = max(days)
+
+        # -------- Optimistic short-circuit ------------------------------
+        for d in days:
+            entry = self.backend.read(d)
+            if entry and entry.confirmed_complete_up_to_date and entry.confirmed_complete_up_to_date > max_date_in_range:
+                # At least one day already confirms completeness beyond the
+                # range – probing is unnecessary.
+                return False
+
+        # -------- Fallback to comprehensive check (may scan) ------------
         cache_data = self._scan_cache_directory(execution_date)
-        
-        # Check if we have later cache data
+
+        # Check if we have any later cached day with data.
         has_later_cache = any(
-            cd > max_date_in_range and has_data 
+            cd > max_date_in_range and has_data
             for cd, (has_data, _) in cache_data.items()
         )
         if has_later_cache:
             return False
-        
-        # Check if any past day needs confirmation
+
+        # See if any day in the past range lacks confirmation or data.
         for day in days:
             if day >= execution_date:
                 continue
@@ -161,7 +180,7 @@ class DailyStreamer(RangeStreamingStrategy):
             has_data, confirmed = cache_data[day]
             if not has_data or confirmed is None or confirmed < day:
                 return True
-        
+
         return False
     
     def _perform_completeness_probe(
