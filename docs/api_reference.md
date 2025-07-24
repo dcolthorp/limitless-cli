@@ -127,9 +127,85 @@ wait time in seconds before retrying.
 - `speakerName`: Speaker identifier for certain node types
 - `speakerIdentifier`: "user" when speaker is identified as the user, null otherwise
 
+## MCP Server Integration
+
+The Limitless CLI includes a built-in MCP (Model Context Protocol) server that provides programmatic access to the API through AI assistants and other MCP-compatible tools.
+
+### Starting the MCP Server
+
+```bash
+limitless mcp
+```
+
+The server runs on stdio transport and exposes the following tools:
+
+### MCP Tools
+
+#### fetch_day
+
+Fetches Limitless logs for a specific date with flexible date specifications.
+
+**Parameters:**
+
+- `date_spec` (string): Date specification - YYYY-MM-DD format or shorthand ('today', 'yesterday')
+- `timezone` (string, optional): IANA timezone specifier (default: UTC)
+- `include_markdown` (boolean, optional): Include markdown content (default: true)
+- `include_headings` (boolean, optional): Include headings in response (default: true)
+- `raw` (boolean, optional): Return raw API response instead of formatted output (default: false)
+
+**Returns:**
+
+```json
+{
+  "date": "2024-01-15",
+  "timezone": "UTC",
+  "logs_count": 5,
+  "logs": [
+    /* formatted or raw log entries */
+  ],
+  "max_date_in_logs": "2024-01-15"
+}
+```
+
+**Error Response:**
+
+```json
+{
+  "error": "Invalid date specification: invalid-date",
+  "valid_formats": ["YYYY-MM-DD", "today", "yesterday"],
+  "date_spec": "invalid-date",
+  "timezone": "UTC"
+}
+```
+
+### Integration Examples
+
+#### Claude Desktop Configuration
+
+Add to your Claude Desktop MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "limitless": {
+      "command": "limitless",
+      "args": ["mcp"],
+      "env": {
+        "LIMITLESS_API_KEY": "your_api_key_here"
+      }
+    }
+  }
+}
+```
+
+#### Cursor IDE Integration
+
+The MCP server can be used with Cursor's AI features to analyze your Limitless data within your development environment.
+
 ## Notes
 
 - The API is currently in beta and supports Pendant data only
 - Timezones/offsets in start/end parameters are ignored; use `timezone` parameter
 - Use `cursor` parameter for pagination when limit is reached
 - Maximum `limit` is 10 entries per request
+- MCP server requires `LIMITLESS_API_KEY` environment variable to be set

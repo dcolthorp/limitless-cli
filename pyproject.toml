@@ -15,7 +15,8 @@ requires-python = ">=3.9"
 dependencies = [
     "requests>=2.25.0",
     "python-dateutil>=2.8.2",
-    "tzdata>=2021.1; python_version < '3.9'"
+    "tzdata>=2021.1; python_version < '3.9'",
+    "fastmcp>=2.0.0"
 ]
 
 [project.optional-dependencies]

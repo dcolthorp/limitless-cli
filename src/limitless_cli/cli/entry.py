@@ -14,6 +14,7 @@ from .commands import (
     handle_week,
     handle_time_relative,
 )
+from ..mcp.server import run_server as handle_mcp
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -84,6 +85,10 @@ def _build_parser() -> argparse.ArgumentParser:
         p_rel = subs.add_parser(per, help=f"Fetch logs for {per.replace('-', ' ')}.")
         p_rel.add_argument("-p", "--parallel", type=int, default=1, help="Max days to fetch in parallel.")
         p_rel.set_defaults(func=lambda a, per=per: handle_time_relative(a, per, quiet=getattr(a, "quiet", False)))
+
+    # ---------------- mcp ----------------
+    p_mcp = subs.add_parser("mcp", help="Start MCP server for AI integration.")
+    p_mcp.set_defaults(func=lambda a: handle_mcp())
 
     return parser
 
